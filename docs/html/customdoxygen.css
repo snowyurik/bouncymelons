@@ -1,0 +1,67 @@
+
+
+/* vihv */
+body {
+    color: #333;
+    /*background: url(witewall.png);*/
+}
+div.contents {
+    background: url(witewall.png);
+    margin: 0;
+    padding: 12px;
+}
+hr.footer {
+    margin-top: 0;
+}
+/*#titlearea {
+    background: rgba(255,255,255,0.);
+}*/
+#projectalign {
+    padding: 15px 0 15px 0.5em;
+}
+#projectname, #projectbrief, #projectnumber {
+    font-family: 'Nimbus Mono L',monospace;
+    line-height: 1;
+}
+#projectname, #projectbrief {
+    margin-left: 67px;
+}
+
+/*--bm-logo--*/
+#bm-logo {
+    margin: 11px 0 0 6px;
+    float: left;
+    font-size: 48px;
+    width: 1em;/*50px;*/
+    height: 1em;/*50px;*/
+    border: 0.05em solid #777;
+    border-top: none;
+    position: relative;
+    overflow: hidden;
+    box-shadow:  inset 0 0 0.12em 0.12em #fff;
+}
+#bm-logo:before, #bm-logo:after {
+    content: ' ';
+    position: absolute;
+    width: 0.96em;
+    height: 0.96em;
+    border-radius: 100%;
+    bottom: -0.5em;
+    z-index: -1;
+}
+#bm-logo:before {
+    left: -0.52em;
+    border-right: 0.05em solid #333;
+}
+#bm-logo:after {
+    right: -0.52em;
+    border-left: 0.05em solid #333;
+}
+/*--\bm-logo--*/
+
+.title {
+    font-weight: normal;
+}
+h1, h2, h3, h4, h5, h6 {
+    font-weight: normal;
+}
