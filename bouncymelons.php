@@ -14,6 +14,7 @@ class ESelect extends Exception {}
 class ESelectOne extends Exception {}
 class EConnectionNotEstablished extends Exception {}
 class EViewModelNotFound extends Exception {}
+class EBmIsNull extends Exception {}
 
 /**
  * \example basic-usage.php
@@ -70,8 +71,11 @@ class BouncyMelons {
 	 */
 	public function connect($dsn, $user, $password, $options = [\PDO::ATTR_PERSISTENT => true]) {
 		try {
+//            var_dump($dsn, $user, $password);
 			$this->setPDO(new \PDO($dsn, $user, $password, $options));
-			if(!$this->getDriver() instanceof SqliteDriver) {
+			if(!($this->getDriver() instanceof SqliteDriver) &&
+                !($this->getDriver() instanceof PgsqlDriver)
+                ) {
 				$this->exec('set names utf8'); // sqlite des not support set names
 			}
 		} catch(\PDOException $e) {
@@ -94,6 +98,7 @@ class BouncyMelons {
 	public function parkOne($vm) {
 		$this->vms[] = $vm;
 		$vm->setBm($this);
+		$vm->onParked();
 	}
 	
 	/**
@@ -123,9 +128,27 @@ class BouncyMelons {
 	 * @return bool
 	 */
 	public function tableExist($name) {
-		return false !== $this->getPDO()->query("SELECT 1 FROM `".$name."`");
+        try {
+            return false !== $this->getPDO()->query("SELECT '1' as field1 FROM ".$this->quot($name)." ");
+        } catch(\PDOException $e) {
+//            echo $e->getMessage();
+            return false;
+        }
 	}
 	
+    
+    // quote mark for names ` for mysql and sqlite " for pgsql
+    public function q() {
+        if($this->getDriver() instanceof PgsqlDriver) {
+            return '"';
+        }
+        return '`';
+    }
+    
+    public function quot($name) {
+        return $this->q().$name.$this->q();
+    }
+    
 	/**
 	 * @return IDriver
 	 */
@@ -133,10 +156,18 @@ class BouncyMelons {
 		$att = \PDO::ATTR_DRIVER_NAME; //on some systems php treats 16 as 'non numeric' so I'll force it to be int
 		$driver = @$this->getPDO()->getAttribute((int)$att);
 		if($driver == 'sqlite') {
-			return new SqliteDriver($this->getPDO());
+			return new SqliteDriver($this);
 		}
-		return new MysqlDriver($this->getPDO());
+        if($driver == 'pgsql') {
+            return new PgsqlDriver($this);
+        }
+		return new MysqlDriver($this);
 	}
+
+
+    public function createTable($tableName, $fields) {
+        $this->getDriver()->createTable($tableName, $fields, $this);
+    }
 
 	/**
 	 * 
@@ -237,7 +268,8 @@ class BouncyMelons {
 //		foreach($fields as $field) {
 //			$names[] = $field->getName();
 //		}
-		return $this->query("SELECT `".implode("`,`",$fields)."` FROM `".$table."` ".$wr." ".$gb." ".$ob." ".$lim);
+		return $this->query("SELECT ".$this->quot(implode($this->quot(","),$fields))." 
+        FROM ".$this->quot($table)." ".$wr." ".$gb." ".$ob." ".$lim);
 	}
 	
 	/**
@@ -291,7 +323,7 @@ class BouncyMelons {
 	 * @param int $id
 	 */
 	public function remove($table, $id) {
-		$this->exec("DELETE FROM `".$table."` WHERE `id` = '".(int)$id."'");
+		$this->exec("DELETE FROM ".$this->quot($table)." WHERE id = '".(int)$id."'");
 	}
 	
 	/**
@@ -335,6 +367,9 @@ class BouncyMelons {
 	}
 
 
+    public static function getNamespaceDelimiter() {
+        return ".";
+    }
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/interface/IField.php
@@ -407,6 +442,11 @@ interface IVModel {
 	 * @return \bm\IList list model
 	 */
 	public function getListModel();
+
+	/**
+	event invoked them vm is parked
+	*/
+	public function onParked();
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/interface/IGroupBy.php
@@ -521,7 +561,7 @@ interface ISingle {
 
 interface IDriver {
 	
-	public function __construct(\PDO $pdo);
+	public function __construct(BouncyMelons $bm);
 
 	/**
 	 * @param String $table table name
@@ -541,6 +581,15 @@ interface IDriver {
 class GroupBy implements IGroupBy {
 	
 	private $fieldName;
+    protected $bm;
+
+    public function setBm(BouncyMelons $bm) {
+        $this->bm = $bm;
+    }
+    
+    public function getBm() {
+        return $this->bm;
+    }
 	
 	/**
 	 * @param string $fieldName
@@ -550,7 +599,7 @@ class GroupBy implements IGroupBy {
 	}
 	
 	public function __toString() {
-		return "`".$this->fieldName."`";
+		return $this->getBm()->quot($this->fieldName);
 	}
 }
 
@@ -598,6 +647,9 @@ abstract class Single implements ISingle {
 		if(empty($fields)) {
 			throw new EFieldsNotDeclared("implement \bm\Single::declareFields()");
 		}
+        foreach($fields as $field) {
+            $field->setBm($bm);
+        }
 		$cache->set($this->getSlug(),'fields',$fields);
 		return $fields;
 	}
@@ -665,6 +717,7 @@ abstract class Single implements ISingle {
 	}
     
     public function firstSave() {
+        return true;
         if(!in_array($this->getTableName(), self::$alteredTables)) {
             self::$alteredTables[] = $this->getTableName();
             return true;
@@ -762,41 +815,33 @@ abstract class Single implements ISingle {
 	}
 
 	public function createTableIfNeeded() {
+        //echo "\nin createTableIfNeeded";
 		$bm = $this->getBm();
 		if($bm->tableExist($this->getTableName())) {
+            //echo "\ntable ".$this->getTableName()." exists";
 			return;
 		}
+        //echo "\ntable ".$this->getTableName()." not exists";
 		$this->createTable();
 	}
 	
 	public function getTableName() {
-		return str_replace("\\",".",strtolower(get_class($this)));
+		return str_replace("\\",BouncyMelons::getNamespaceDelimiter(),strtolower(get_class($this)));
 	}
 	
 	public function getSlug() {
-		return str_replace("\\",".",strtolower(get_class($this)));
+		return str_replace("\\",BouncyMelons::getNamespaceDelimiter(),strtolower(get_class($this)));
 	}
 
 	public function createTable() {
-//		var_dump('in single::createTable');
-		$sqlFields = [];
-		foreach($this->getFields() as $field) {
-			if($field->isCalc()) {
-				continue;
-			}
-			$sqlFields[] ="`".$field->getName()."` ".$field->getSqlType();
-		}
 		$bm = $this->getBm();
-		
-		$sql = "CREATE TABLE `".$this->getTableName()."`(
-				".$bm->getCreatePrimaryId().",
-				".implode(",",$sqlFields)."
-				) ".$bm->getCreateDefaultCharset();
-//		var_dump("create table sql:", $sql);
-		$bm->exec($sql);
+		$this->getBm()->createTable($this->getTableName(),$this->getFields());
 	}
 	
 	public function alterTable() {
+        if($this->tableStructureReadonly()) {
+            return false;
+        }
 		$bm = $this->getBm();
 		$dbFields = $bm->getTableFields($this->getTableName());
 		$dbFieldNames = array_column($dbFields, 'field');
@@ -820,25 +865,20 @@ abstract class Single implements ISingle {
 	}
 	
 	public function addField($field) {
+        
+        $bm = $this->getBm();
 		$sql = "
 			ALTER TABLE
-				`".$this->getTableName()."`
+				".$bm->quot($this->getTableName())."
 			ADD
-				`".$field->getName()."` ".$field->getSqlType()."
+				".$bm->quot($field->getName())." ".$field->getSqlType()."
 			";
-		$bm = $this->getBm();
 		$bm->exec($sql);
 	}
 	
 	public function updateFieldType($field) {
-		$sql = "
-			ALTER TABLE
-				`".$this->getTableName()."`
-			MODIFY COLUMN
-				`".$field->getName()."` ".$field->getSqlType()."
-			";
-		$bm = $this->getBm();
-		$bm->exec($sql);
+        $bm = $this->getBm();
+        $bm->getDriver()->updateFieldType($this->getTableName(), $field->getName(), $field->getSqlType());
 	}
 
 	public function getBm() {
@@ -851,6 +891,10 @@ abstract class Single implements ISingle {
 	public function setBm(BouncyMelons $bm) {
 		$this->bm = $bm;
 	}
+    
+    public function tableStructureReadonly() {
+        return false;
+    }
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/single/AutoSingle.php
@@ -901,6 +945,15 @@ class AutoSingle extends Single implements ISingle {
 	public function getSlug() {
 		return $this->list->getSlug();
 	}
+    
+    public function tableStructureReadonly() {
+        try {
+			if(method_exists($this->getVModel(), 'tableStructureReadonly')) {
+				return $this->getVModel()->tableStructureReadonly();
+			}
+		} catch (EVModelNotFound $e) {}
+		return parent::tableStructureReadonly();
+    }
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/list/DataList.php
@@ -909,6 +962,7 @@ class AutoSingle extends Single implements ISingle {
 class DataList {
 	
 	protected $vmodel;
+    protected $sourceIsTable = false;
 	
 	public function __construct(IVModel $vmodel) {
 		$this->vmodel = $vmodel;
@@ -935,6 +989,14 @@ class DataList {
 	public function getViewName() {
 		return $this->getTableName()."_view";
 	}
+    
+    public function getSourceIsTable() {
+        return $this->sourceIsTable;
+    }
+    
+    public function setSourceIsTable($value) {
+        $this->sourceIsTable = $value;
+    }
 
 	/**
 	 * @param IFilter $filter 
@@ -943,14 +1005,20 @@ class DataList {
 	public function find(IFilter $filter) {
 		$this->createViewIfNeeded();
 		$bm = $this->getBm();
+        //var_dump('before filter->setBm', is_null($bm));
 		$filter->setBm($bm);
+        //var_dump('after filter->setBm', is_null($filter->getBm()));
 		$fields = $this->getFields();
 		$where = $filter->createWhere($fields);
 		$orderby = $filter->createOrderBy($fields);
 		$limit = $filter->createLimit();
-
-		$data = $bm->select($this->getViewName()
-			, $this->getFieldNames()
+        
+        $source = $this->getViewName();
+        if($this->getSourceIsTable()) {
+                $source = $this->getTableName();
+        }
+		$data = $bm->select($source//$this->getViewName()
+			, $this->getFieldNames(!$this->getSourceIsTable())
 //			, $this->getFields()
 			, $where, $limit, $orderby
 			, $filter->createGroupBy()
@@ -1008,7 +1076,7 @@ class DataList {
 		if(!empty($where)) {
 			$wr = "WHERE ".$where;
 		}
-		return (int)$bm->queryParam("SELECT COUNT(*) FROM `".$this->getViewName()."` ".$wr);
+		return (int)$bm->queryParam("SELECT COUNT(*) FROM ".$bm->quot($this->getViewName())." ".$wr);
 	}
 	
 	/**
@@ -1046,7 +1114,7 @@ class DataList {
 	public function getOne($id, $column='id') {
 		$item = $this->createSingle();
 		$bm = $this->getBm();
-		$data = $bm->selectOne($this->getTableName(), $this->getFieldNames(false, false),"`".$column."`='".$id."'");
+		$data = $bm->selectOne($this->getTableName(), $this->getFieldNames(false, false),$bm->quot($column)."='".$id."'");
 		$item->setData($data);
 		return $item;
 	}
@@ -1055,7 +1123,7 @@ class DataList {
 		$this->createViewIfNeeded();
 		$item = $this->createSingle();
 		$bm = $this->getBm();
-		$data = $bm->selectOne($this->getViewName(), $this->getFieldNames(),"`".$column."`='".$id."'");
+		$data = $bm->selectOne($this->getViewName(), $this->getFieldNames(), $bm->quot($column)."='".$id."'");
 		$item->setData($data);
 		return $item;
 	}
@@ -1100,9 +1168,9 @@ class DataList {
 		$sqlFields = implode(',',$fieldsToSelect);
 		$this->createViewAs("
 			SELECT
-				`".$this->getTableName()."`.id, ".$sqlFields."
+				".$this->getBm()->quot($this->getTableName()).".id, ".$sqlFields."
 			FROM
-				`".$this->getTableName()."`
+				".$this->getBm()->quot($this->getTableName())."
 			".$joins);
 	}
 	
@@ -1123,10 +1191,11 @@ class DataList {
 				$viewModel = $bm->getVmBySlug($field->getOption('list'));
                 $list = $viewModel->getListModel(); 
 				$joins .= "
-					LEFT JOIN `".$field->getJoinTableName($list)."` 
-						AS `".$list->getTableName().$field->getName()."`	
+					LEFT JOIN ".$bm->quot($field->getJoinTableName($list))." 
+						AS ".$bm->quot($list->getTableName().$field->getName())."	
 					ON (
-						`".$list->getTableName().$field->getName()."`.id = `".$this->getTableName()."`.".$field->getName()."
+						".$bm->quot($list->getTableName().$field->getName()).".id = ".
+                        $bm->quot($this->getTableName()).".".$field->getName()."
 					)";
 			}
 		}
@@ -1143,15 +1212,15 @@ class DataList {
 			if($field->getOption('calc') == true) {
 				continue;
 			}
-			$temp = "`".$this->getTableName()."`.`".$field->getName()."`";
+			$temp = $bm->quot($this->getTableName()).".".$bm->quot($field->getName());
 			if(!empty($prefix)) {
-				$temp .=" AS `".$prefix.$field->getName()."`";
+				$temp .=" AS ".$bm->quot($prefix.$field->getName());
 			}
 			if($field instanceof IdField) {
 				$viewModel = $bm->getVmBySlug($field->getOption('list'));
 				$list = $viewModel->getListModel();
 				$temp = $list->titleToSelect($field->getName(), $prefix);
-				$temp .= ",`".$list->getTableName().$field->getName()."`.`id` AS `".$prefix.$field->getName()."_id`";
+				$temp .= ",".$bm->quot($list->getTableName().$field->getName()).".id AS ".$bm->quot($prefix.$field->getName()."_id");
 			}
 			$fieldsToSelect[] = $temp;
 		}
@@ -1159,15 +1228,16 @@ class DataList {
 	}
 	
 	public function titleToSelect($fieldName, $prefix = '') {
+        $bm = $this->getBm();
 		$single = $this->createSingle();
 		$titleField = $single->getTitleField();
-		return "`".$this->getTableName().$fieldName."`.`".$titleField->getName()."` AS `".$prefix.$fieldName."`";
+		return $bm->quot($this->getTableName().$fieldName).".".$bm->quot($titleField->getName())." AS ".$bm->quot($prefix.$fieldName);
 	}
 	
 	/**
 	 * @return \bm\BouncyMelons
 	 */
-	public function getBm() {
+	public function getBm():BouncyMelons {
 		return $this->vmodel->getBm();
 	}
 	
@@ -1277,6 +1347,7 @@ class Field implements IField{
 	protected $title;
 	protected $sqlType;
 	protected $options = [];
+    protected $bm;
 	
 	/**
 	 * @param string $name field name, should be latin lowercase, no spaces 
@@ -1294,6 +1365,14 @@ class Field implements IField{
 		$this->options = $options;
 		$this->sqlType = $sqlType;
 	}
+    
+    public function setBm(BouncyMelons $bm) {
+        $this->bm = $bm;
+    }
+    
+    public function getBm() {
+        return $this->bm;
+    }
 	
 	/**
 	 * @return string field name
@@ -1342,7 +1421,7 @@ class Field implements IField{
 	 */
 	public function getSqlType() {
 		if(empty($this->sqlType)) {
-			return static::DEFAULT_SQL_TYPE;
+			return $this->getBm()->getDriver()->correctType(static::DEFAULT_SQL_TYPE);
 		}
 		return strtolower($this->sqlType);
 	}
@@ -1474,6 +1553,9 @@ class IntField extends Field {
 	
 	const DEFAULT_SQL_TYPE = "int(11)";
 	
+    public function beforeSet($value) {
+        return (int)$value;
+    }
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/field/BoolField.php
@@ -1584,6 +1666,29 @@ class TextField extends Field {
 	const DEFAULT_SQL_TYPE = "text";
 }
 
+///home/yoreck/www/vihv-subprojects/bouncymelons/inc/field/DateTimeField.php
+
+
+class DateTimeField extends Field{
+	const DEFAULT_SQL_TYPE = "datetime";
+	
+	public function beforeSet($value) {
+		return date('Y-m-d H:i:s',strtotime($value));
+	}
+	
+	public function beforeGet($value) {
+		$val = parent::beforeGet($value);
+		$format = $this->getOption('format');
+		if(empty($format)) {
+			$format = "Y-m-d H:i:s";
+		}
+        if(strpos($format,'%') !== false) {
+            return strftime($format,strtotime($value));
+        }
+		return date($format,strtotime($value));
+	}
+}
+
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/field/BlobField.php
 
 
@@ -1631,26 +1736,6 @@ class TimeField extends Field {
 		$format = $this->getOption('format');
 		if(empty($format)) {
 			$format = "H:i:s";
-		}
-		return date($format,strtotime($value));
-	}
-}
-
-///home/yoreck/www/vihv-subprojects/bouncymelons/inc/field/DatetimeField.php
-
-
-class DatetimeField extends Field{
-	const DEFAULT_SQL_TYPE = "datetime";
-	
-	public function beforeSet($value) {
-		return date('Y-m-d H:i:s',strtotime($value));
-	}
-	
-	public function beforeGet($value) {
-		$val = parent::beforeGet($value);
-		$format = $this->getOption('format');
-		if(empty($format)) {
-			$format = "Y-m-d H:i:s";
 		}
 		return date($format,strtotime($value));
 	}
@@ -1743,6 +1828,9 @@ class VModel implements IVModel {
 	
 	protected $bm;
 	protected $list;
+
+
+	public function onParked() {}
 	
 	/**
 	 * override this to use custom list model
@@ -1778,7 +1866,6 @@ class VModel implements IVModel {
 		$list = $this->getListModel();
 		if($list instanceof AutoList) {
 			return $this->readSlug();
-//			return str_replace("\\",".",strtolower(get_class($this)));
 		}
 		return $list->getTableName();
 	}
@@ -1788,7 +1875,7 @@ class VModel implements IVModel {
 	}
 
 	public static function getSlug() {
-		return str_replace("\\",".",strtolower(static::class));
+		return str_replace("\\",BouncyMelons::getNamespaceDelimiter(),strtolower(static::class));
 	}
 	
 	public function getTitle() {
@@ -1823,7 +1910,15 @@ abstract class OrderByClause implements IOrderByClause {
 	 * @var string
 	 */
 	protected $fieldName;
+    protected $bm;
 
+    public function setBm(BouncyMelons $bm) {
+        $this->bm = $bm;
+    }
+    
+    public function getBm() {
+        return $this->bm;
+    }
 	public function __construct($fieldName) {
 		$this->fieldName = $fieldName;
 	}
@@ -1844,7 +1939,7 @@ abstract class OrderByClause implements IOrderByClause {
 
 class Asc extends OrderByClause {	
 	public function get() {
-		return "`".$this->getFieldName()."` ASC"; 
+		return $this->getBm()->quot($this->getFieldName())." ASC"; 
 	}
 }
 
@@ -1854,7 +1949,7 @@ class Asc extends OrderByClause {
 class Desc extends OrderByClause {
 	
 	public function get() {
-		return "`".$this->getFieldName()."` DESC"; 
+		return $this->getBm()->quot($this->getFieldName())." DESC"; 
 	}
 
 }
@@ -1878,16 +1973,27 @@ abstract class Filter implements IFilter {
 	protected $itemsPerPage;
 	protected $orderBy;
 	protected $groupBy;
+    
+    //@var BouncyMelons
 	private $bm;
 
 
 	public function __constcruct() {}
 	
-	public function setBm($bm) {
+	public function setBm(BouncyMelons $bm) {
+        if($bm == null) {
+//            var_dump($bm);
+            throw new EBmIsNull();
+        }
 		$this->bm = $bm;
+//        var_dump("Filter setBm");
+        //var_dump("bm null ",is_null($this->bm));
 	}
 	
-	public function getBm() {
+	public function getBm():BouncyMelons {
+        /*if(empty($this->bm)) {
+            throw new EBmIsNull();
+        }*/
 		return $this->bm;
 	}
 
@@ -1918,10 +2024,16 @@ abstract class Filter implements IFilter {
 	 */
 	public function setOrderBy($orderBy) {
 		$this->orderBy = $orderBy;
+//        foreach($this->orderBy as $item) { 
+//            $item->setBm($this->getBm());
+//        }
 	}
 	
 	public function setGroupBy($groupBy) {
 		$this->groupBy = $groupBy;
+//        foreach($this->groupBy as $item) {
+//            $item->setBm($this->getBm());
+//        }
 	}
 
 	/**
@@ -1937,14 +2049,20 @@ abstract class Filter implements IFilter {
 			return "";
 		}
 		$offset = $this->getPage()*$itemsperpage;
-		return $offset.','.$itemsperpage;
+		return $itemsperpage.' OFFSET '.$offset;
 	}
 
 	public function createOrderBy($fields) {
+        foreach($this->orderBy as $item) { 
+            $item->setBm($this->getBm());
+        }
 		return implode(",",$this->orderBy);
 	}
 	
 	public function createGroupBy() {
+        foreach($this->groupBy as $item) {
+            $item->setBm($this->getBm());
+        }
 		return implode(",",$this->groupBy);
 	}
 }
@@ -2065,18 +2183,21 @@ class FilterPermissive extends FilterComplex {
 	 * @return string
 	 */
 	public function createWhere($fields) {
+        $bm = $this->getBm();
 		$input = $this->getWhere();
 		$re = [];
 		foreach ($fields as $field) {
 			if($field instanceof IdField) {
 				if(!empty($input[$field->getName()."_id"])) {
-					$re[] = "`".$field->getName()."_id` = '".$input[$field->getName()."_id"]."'";
+					$re[] = $bm->quot($field->getName()."_id")." = '".$input[$field->getName()."_id"]."'";
 					continue;
 				}
 			}
-			if($field instanceof BoolField) {
+			if($field instanceof BoolField
+                || $field instanceof IntField
+            ) {
 				if(isset($input[$field->getName()])) {
-					$re[] = "`".$field->getName()."`='".$input[$field->getName()]."'";
+					$re[] = $bm->quot($field->getName())."='".$input[$field->getName()]."'";
 				}
 				continue;
 			}
@@ -2086,19 +2207,20 @@ class FilterPermissive extends FilterComplex {
 			if(is_array($input[$field->getName()])) {
 				if(!empty($input[$field->getName()]['from'])
 					&& !empty($input[$field->getName()]['to'])) {
-					$re[] = "`".$field->getName()."` BETWEEN 
+					$re[] = $bm->quot($field->getName())." BETWEEN 
 						'".$field->beforeSet($input[$field->getName()]['from'])."'
 						AND '".$field->beforeSet($input[$field->getName()]['to'])."'";
 					continue;
 					}
 				if(!empty($input[$field->getName()]['from'])) {
-					$re[] = "`".$field->getName()."` = '".$input[$field->getName()]['from']."'";
+					$re[] = $bm->quot($field->getName())." = '".$input[$field->getName()]['from']."'";
 					continue;
 				}
-				$re[] = "`".$field->getName()."` IN ('".implode("','",$input[$field->getName()])."')";
+				$re[] = $bm->quot($field->getName())." IN ('".implode("','",$input[$field->getName()])."')";
 				continue;
 			}
-			$re[] = "`".$field->getName()."` LIKE '%".$input[$field->getName()]."%'";
+            
+			$re[] = $bm->quot($field->getName())." LIKE '%".$input[$field->getName()]."%'";
 		}
 //		var_dump(implode(' AND ', $re));
 		return implode(' AND ', $re);
@@ -2114,6 +2236,7 @@ class FilterStrict extends FilterComplex {
 	 * @return string
 	 */
 	public function createWhere($fields) {
+        $bm = $this->getBm();
 		$input = $this->getWhere();
 //		var_dump($input,  array_key_exists('lkey', $input));
 		$re = [];
@@ -2122,17 +2245,17 @@ class FilterStrict extends FilterComplex {
 //			var_dump($field->getName());
 			if($field instanceof \bm\IdField) {
 				if(array_key_exists($field->getName()."_id", $input)) {
-					$re[] = "`".$field->getName()."_id` = '".$input[$field->getName()."_id"]."'";
+					$re[] = $bm->quot($field->getName()."_id")." = '".$input[$field->getName()."_id"]."'";
 				}
 			}
 			if (!array_key_exists($field->getName(), $input)) {
 				continue;
 			}
 			if(is_array($input[$field->getName()])) {
-				$re[] = "`".$field->getName()."` IN ('".implode("','",$input[$field->getName()])."')";
+				$re[] = $bm->quot($field->getName())." IN ('".implode("','",$input[$field->getName()])."')";
 				continue;
 			}
-			$re[] = "`".$field->getName()."` = '".$input[$field->getName()]."'";
+			$re[] = $bm->quot($field->getName())." = '".$input[$field->getName()]."'";
 		}
 //		var_dump(implode(' AND ', $re));
 		return implode(' AND ', $re);
@@ -2144,15 +2267,24 @@ class FilterStrict extends FilterComplex {
 
 class Driver {
 	
+    //@var \PDO
 	protected $pdo;
+    
+    //@var BouncyMelons
+    protected $bm;
 	
-	public function __construct(\PDO $pdo) {
-		$this->pdo = $pdo;
+	public function __construct(BouncyMelons $bm) {
+		$this->pdo = $bm->getPDO();
+        $this->bm = $bm;
 	}
 	
 	public function getPDO() {
 		return $this->pdo;
 	}
+    
+    public function getBm() {
+        return $this->bm;
+    }
 	
 	public function exec($query) {
 //		var_dump($query); ///@todo debug mode, log queries to some object like $bm->log($query); $bm->getLog();
@@ -2164,6 +2296,10 @@ class Driver {
 		}
 		$statement = null;
 	}
+    
+    public function quot(String $value) {
+        return $this->getBm()->quot($value);
+    }
 	
 	/**
 	 * 
@@ -2174,10 +2310,10 @@ class Driver {
 //		var_dump('in Driver::select');
 		$names = [];
 		foreach($fields as $field) {
-			$names[] = "`".$field->getName()."`";
+			$names[] = $this->quot($field->getName());
 		}
 		$pdo = $this->getPDO();
-		$sql = "SELECT ".implode(",",$names)." FROM `".$table."` ".$where." ".$limit." ".$orderby." ".$groupBy;
+		$sql = "SELECT ".implode(",",$names)." FROM ".$this->quot($table)." ".$where." ".$limit." ".$orderby." ".$groupBy;
 //		var_dump($sql);
 		$statement = $pdo->prepare($sql);
 //		$pdo->beginTransaction();
@@ -2247,6 +2383,36 @@ class Driver {
 		$data = $this->queryOne($sql);
 		return reset($data);
 	}
+    
+    public function createTable($tableName, $fields, $bm) {
+        $sqlFields = [];
+		foreach($fields as $field) {
+			if($field->isCalc()) {
+				continue;
+			}
+			$sqlFields[] ="`".$field->getName()."` ".$field->getSqlType();
+		}
+        $sql = "CREATE TABLE `".$tableName."`(
+				".$bm->getCreatePrimaryId().",
+				".implode(",",$sqlFields)."
+				) ".$bm->getCreateDefaultCharset();
+//		var_dump("create table sql:", $sql);
+		$this->exec($sql);
+    }
+    
+    public function correctType($type) {
+        return $type;
+    }
+    
+    public function updateFieldType($table, $field, $type) {
+        $sql = "
+			ALTER TABLE
+				".$this->getBm()->quot($table)."
+			MODIFY COLUMN
+				".$this->getBm()->quot($field)." ".$type."
+			";
+		$this->exec($sql);
+    }
 }
 
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/drivers/MysqlDriver.php
@@ -2324,10 +2490,135 @@ class MysqlDriver extends Driver implements IDriver {
 	}
 	
 	public function truncate($table) {
-		$this->exec("TRUNCATE `".$table."`");
+		$this->exec("TRUNCATE ".$this->getBm()->quot($table));
 	}
 }
 
+///home/yoreck/www/vihv-subprojects/bouncymelons/inc/drivers/PgsqlDriver.php
+
+class PgsqlDriver extends MysqlDriver implements IDriver {
+    
+    public function insertOrUpdate($table, $items) {
+		$columns = array_keys($items);
+		$values = array_values($items);
+		$sql = "INSERT INTO \"".$table."\"
+				(\"".implode("\",\"",$columns)."\") 
+				VALUES ('".implode("','",$values)."')";
+        if(!empty($items['id'])) {
+            $sql = 'UPDATE "'.$table.'"
+                SET ';
+            $first = true;
+            foreach($items as $key=>$value) {
+                if($key == 'id') {
+                    continue;
+                }
+                if(!$first) {
+                    $sql .=" , ";
+                }
+                if($first) { 
+                    $first = false;
+                }
+                $sql .= "\"".$key."\" = '".$value."'";
+            }
+            $sql .= " WHERE id='".$items['id']."'";
+        }
+//        var_dump($sql);
+		$re = $this->pdo->query($sql);
+		if($re === false) {
+			list($errno, $errint, $msg) = $this->getPDO()->errorInfo();
+			throw new EInsertFail($sql.$msg, $errint);
+		}
+        if(!empty($items['id'])) {
+            return $items['id'];
+        }
+		$id = $this->pdo->lastInsertId();
+		if($id == 0) {
+			throw new EInsertFail($sql);
+		}
+		return $id;
+	}
+    
+    public function getTableFields($table) {
+		$sql = "SELECT
+            a.attname as \"Field\",
+            pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\"
+        FROM
+            pg_catalog.pg_attribute a
+        WHERE
+            a.attnum > 0
+            AND NOT a.attisdropped
+            AND a.attrelid = (
+                SELECT c.oid
+                FROM pg_catalog.pg_class c
+                WHERE c.relname = '".$table."'
+                    AND pg_catalog.pg_table_is_visible(c.oid)
+        )";
+        $sql = str_replace("\n"," ", $sql);
+//        var_dump($sql);
+        $list = $this->pdo->query($sql)->fetchAll(\PDO::FETCH_ASSOC);
+		$re = [];
+		foreach($list as $item) {
+			$re[] = [
+				'field' => $item['Field'],
+				'type' => strtolower($item['Type']),
+			];
+		}
+//        var_dump($re);
+		return $re;
+	}
+    
+    public function createTable($tableName, $fields, $bm) {
+        $sqlFields = [];
+		foreach($fields as $field) {
+			if($field->isCalc()) {
+				continue;
+			}
+			$sqlFields[] ="".$this->quot($field->getName())." ".$field->getSqlType();
+		}
+        $sql = "CREATE TABLE ".$this->quot($tableName)."(
+				id SERIAL PRIMARY KEY,
+				".implode(",",$sqlFields)."
+				) ";//.$bm->getCreateDefaultCharset();
+//		var_dump("create table sql:", $sql);
+		$this->exec($sql);
+    }
+    
+    public function correctType($type) {
+        if($type == 'int(11)') {
+            return 'integer';
+        }
+        if($type == 'int(1)') {
+            return 'smallint';
+        }
+        if($type == 'varchar(255)') {
+            return 'character varying(255)';
+        }
+        if($type == 'datetime') {
+            return 'timestamp without time zone';
+        }
+        if($type == 'tinyint') {
+            return 'integer';
+        }
+        if($type == 'mediumblob') {
+            return 'bytea';
+        }
+        return $type;
+    }
+    
+    public function createViewAs($view, $sql) {
+		$this->exec("CREATE OR REPLACE VIEW \"".$view."\" AS ".$sql);
+	}
+    
+    public function updateFieldType($table, $field, $type) {
+        $sql = "
+			ALTER TABLE
+				".$this->getBm()->quot($table)."
+			ALTER COLUMN
+				".$this->getBm()->quot($field)." TYPE ".$type."
+			";
+		$this->exec($sql);
+    }
+}
 ///home/yoreck/www/vihv-subprojects/bouncymelons/inc/drivers/SqliteDriver.php
 
 
